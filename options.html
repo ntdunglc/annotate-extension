@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Gemini Annotator Options</title>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="options.css">
+</head>
+<body>
+    <h1>Gemini Annotator Options</h1>
+
+    <div class="form-group">
+        <label for="apiKey">Gemini API Key:</label>
+        <input type="password" id="apiKey" name="apiKey" size="50" placeholder="Enter your Gemini API Key">
+        <button id="save">Save Key</button>
+        <p id="status"></p>
+    </div>
+
+    <p class="help-text">
+        You need an API key to use this extension.
+        <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer">Get your Gemini API Key from Google AI Studio</a>.
+    </p>
+     <p class="help-text">
+        Your API key is stored locally in your browser's storage and is only used to communicate directly with the Google Gemini API.
+    </p>
+
+    <script src="options.js"></script>
+</body>
+</html>
