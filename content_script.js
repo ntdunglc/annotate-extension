@@ -10,8 +10,9 @@
   let tooltipElement = null; // Reference to the single tooltip DIV
   let tooltipTimeout = null; // To add slight delay on hide
 
-  // --- Helper to Find and Wrap Text (Keep Original Logic + Listeners) ---
-  function findAndWrapText(contextNode, searchText, shortExplanation, longExplanation) {
+  // --- Helper to Find and Wrap Text ---
+  // MODIFIED: Added vietnameseTranslation parameter
+  function findAndWrapText(contextNode, searchText, shortExplanation, longExplanation, vietnameseTranslation) {
     const walker = document.createTreeWalker(contextNode, NodeFilter.SHOW_TEXT, { acceptNode: (node) => { const p = node.parentNode.tagName.toUpperCase(); if (p === 'SCRIPT' || p === 'STYLE' || node.parentNode.classList.contains('annotated-phrase')) return NodeFilter.FILTER_REJECT; return node.nodeValue.trim().length > 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP; } });
     let node, foundCount = 0; const nodesToProcess = []; while (node = walker.nextNode()) nodesToProcess.push(node);
     for (var textNode of nodesToProcess) {
@@ -25,6 +26,8 @@
         foundCount++; const matchEnd = matchIndex + searchText.length; const span = document.createElement('span'); span.className = 'annotated-phrase';
         span.dataset.shortExplanation = shortExplanation;
         span.dataset.longExplanation = longExplanation;
+        // ADDED: Store Vietnamese translation in dataset
+        span.dataset.vietnameseTranslation = vietnameseTranslation;
         span.textContent = textNode.nodeValue.substring(matchIndex, matchEnd);
 
         try {
@@ -40,7 +43,7 @@
     } return foundCount > 0;
   }
 
-  // --- Apply Annotations (Keep Original) ---
+  // --- Apply Annotations ---
   function applyAnnotations(annotations) {
     console.log("Applying annotations:", annotations.length);
     if (!mainContentElement) { mainContentElement = document.body; console.warn("Main content element not identified, using document.body."); }
@@ -53,13 +56,21 @@
     annotations.sort((a, b) => b.phrase.length - a.phrase.length);
 
     annotations.forEach(annotation => {
-      if (annotation.phrase && annotation.short_explanation && annotation.long_explanation && annotation.phrase.trim().length > 0) {
+      // MODIFIED: Check for vietnamese_translation as well (assuming it's required)
+      if (annotation.phrase && annotation.short_explanation && annotation.long_explanation && annotation.vietnamese_translation && annotation.phrase.trim().length > 0) {
         try {
-          if (findAndWrapText(mainContentElement || document.body, annotation.phrase, annotation.short_explanation, annotation.long_explanation)) {
+          // MODIFIED: Pass vietnamese_translation to findAndWrapText
+          if (findAndWrapText(
+            mainContentElement || document.body,
+            annotation.phrase,
+            annotation.short_explanation,
+            annotation.long_explanation,
+            annotation.vietnamese_translation // Pass it here
+          )) {
             appliedCount++;
           }
         } catch (e) { console.error(`Error applying "${annotation.phrase}":`, e); }
-      } else { console.warn("Skipping invalid annotation:", annotation); }
+      } else { console.warn("Skipping invalid or incomplete annotation:", annotation); }
     });
     console.log("Applied count:", appliedCount);
     if (appliedCount > 0) { displayMessage(`Annotated ${appliedCount} phrase(s). Hover over dotted text.`, "success"); }
@@ -80,17 +91,16 @@
     console.log("Cleared previous annotations and listeners.");
   }
 
-  // --- Inject CSS (Corrected String Escaping if needed, using Template Literal) ---
+  // --- Inject CSS ---
   function injectAnnotationStyles() {
     const styleId = 'annotator-styles';
     if (document.getElementById(styleId)) return;
 
-    // Use TEMPLATE LITERAL (backticks `) - this handles quotes correctly.
     const css = `
       .annotated-phrase {
         text-decoration: underline;
         text-decoration-style: dotted;
-        text-decoration-color: #d32f2f;
+        text-decoration-color: #d32f2f; /* Changed color slightly */
         text-decoration-thickness: 1.5px;
         cursor: help;
         background-color: transparent;
@@ -106,7 +116,7 @@
         background-color: #263238;
         color: #eceff1;
         font-family: sans-serif;
-        font-size: 0.8em;
+        font-size: 0.8em; /* Slightly smaller base font */
         line-height: 1.4;
         text-align: left;
         border-radius: 6px;
@@ -114,24 +124,41 @@
         pointer-events: none;
         box-shadow: 0 4px 8px rgba(0,0,0,0.3);
         white-space: pre-wrap;
-        /* Add transition for opacity */
         opacity: 0;
         transition: opacity 0.1s ease-in-out;
       }
 
-      #annotator-tooltip-element.visible { /* Class to control visibility */
+      #annotator-tooltip-element.visible {
           display: block;
           opacity: 1;
       }
 
       #annotator-tooltip-element .short-explanation {
-           font-weight: bold; display: block; margin-bottom: 5px;
+           font-weight: bold; display: block; margin-bottom: 5px; font-size: 1.05em; /* Make short slightly bigger */
        }
       #annotator-tooltip-element .explanation-separator {
-           display: block; height: 1px; background-color: #455a64; margin: 5px 0 8px 0;
+           display: block; height: 1px; background-color: #455a64; margin: 6px 0 8px 0; /* Adjusted margin */
        }
-      #annotator-tooltip-element .long-explanation { display: block; }
+      #annotator-tooltip-element .long-explanation {
+          display: block; margin-bottom: 5px; /* Add margin if translation follows */
+      }
 
+      /* ADDED: Styles for Vietnamese Translation */
+      #annotator-tooltip-element .vietnamese-separator {
+           display: block; height: 1px; background-color: #455a64; margin: 8px 0 6px 0; /* Similar separator */
+       }
+       #annotator-tooltip-element .vietnamese-translation {
+           display: block;
+           color: #b0bec5; /* Slightly dimmer color */
+           /* font-style: italic; /* Optional: make it italic */
+       }
+       #annotator-tooltip-element .vietnamese-translation strong {
+           font-weight: bold;
+           color: #cfd8dc; /* Slightly brighter label color */
+       }
+
+
+      /* Message styles remain the same */
       #annotator-message, #annotator-processing-message {
          position: fixed; top: 20px; right: 20px; padding: 12px 18px;
          border-radius: 5px; color: white; font-family: sans-serif;
@@ -145,11 +172,10 @@
       #annotator-message.warning { background-color: #ff9800; }
       #annotator-message.info { background-color: #2196F3; }
       #annotator-processing-message { background-color: #607d8b; }
-    `; // END OF TEMPLATE LITERAL
+    `;
 
     const style = document.createElement('style');
     style.id = styleId;
-    // Use textContent which is generally safer and more performant than innerHTML for style tags
     style.textContent = css;
     document.head.appendChild(style);
     console.log("Annotator styles injected/updated.");
@@ -168,99 +194,80 @@
     return tooltipElement;
   }
 
+  // MODIFIED: Function to show tooltip, including Vietnamese translation
   function showTooltip(targetSpan) {
     const tip = getOrCreateTooltipElement();
     clearTimeout(tooltipTimeout);
 
     const shortExplanation = targetSpan.dataset.shortExplanation || '';
     const longExplanation = targetSpan.dataset.longExplanation || '';
+    // ADDED: Get Vietnamese translation from dataset
+    const vietnameseTranslation = targetSpan.dataset.vietnameseTranslation || '';
 
-    if (!shortExplanation && !longExplanation) return;
+    // MODIFIED: Check if *any* explanation exists
+    if (!shortExplanation && !longExplanation && !vietnameseTranslation) return;
 
     let htmlContent = '';
     if (shortExplanation) htmlContent += `<span class="short-explanation">${escapeHtml(shortExplanation)}</span>`;
+
     if (shortExplanation && longExplanation) htmlContent += `<span class="explanation-separator"></span>`;
     if (longExplanation) htmlContent += `<span class="long-explanation">${escapeHtml(longExplanation)}</span>`;
-    tip.innerHTML = htmlContent;
 
-    // Make visible using class *before* calculating position
+    // ADDED: Add Vietnamese translation section if it exists
+    if (vietnameseTranslation) {
+      // Add a separator if there was previous English content
+      if (shortExplanation || longExplanation) {
+        htmlContent += `<span class="explanation-separator vietnamese-separator"></span>`; // Use a specific class if needed
+      }
+      // Add the translation with a label
+      htmlContent += `<span class="vietnamese-translation"><strong>Tiếng Việt:</strong> ${escapeHtml(vietnameseTranslation)}</span>`;
+    }
+
+    tip.innerHTML = htmlContent; // Set the combined HTML
+
     tip.classList.add('visible');
-
-    // Calculate and apply position
     positionTooltip(targetSpan, tip);
 
-    // Opacity transition is handled by CSS (.visible class)
     console.log("Showing tooltip for:", targetSpan.textContent);
   }
 
+
   function hideTooltip() {
     if (tooltipElement) {
-      clearTimeout(tooltipTimeout); // Clear any pending hide actions
-      // Remove the visible class to trigger fade-out transition
+      clearTimeout(tooltipTimeout);
       tooltipElement.classList.remove('visible');
-      // We don't need display:none immediately because opacity 0 hides it,
-      // and pointer-events: none prevents interaction.
-      // Keeping display:block allows potential future transitions on properties like transform.
-      console.log("Hiding tooltip");
     }
   }
 
-  // *** REVISED positionTooltip Function ***
+  // Position Tooltip Function (Revised, remains the same logic)
   function positionTooltip(targetSpan, tip) {
-    const targetRect = targetSpan.getBoundingClientRect(); // Coords relative to viewport
-    const tipElement = tip; // Use the direct element reference
-
-    // Ensure tooltip is rendered (display: block) to get accurate dimensions
-    // This is now handled by adding '.visible' class *before* calling positionTooltip
-
-    const tipRect = tipElement.getBoundingClientRect(); // Get tooltip dimensions
-
+    const targetRect = targetSpan.getBoundingClientRect();
+    const tipElement = tip;
+    const tipRect = tipElement.getBoundingClientRect();
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
-    const buffer = 8; // Space between target and tooltip
+    const buffer = 8;
 
     let top, left;
-
-    // --- Position Strategy: Try above first, then below ---
-
-    // Calculate potential top position (above target)
-    // Use targetRect.top directly (viewport relative)
     let potentialTop = targetRect.top - tipRect.height - buffer;
 
-    // Check if potential top position is within viewport
-    if (potentialTop >= buffer) { // Check if it fits above (with buffer)
+    if (potentialTop >= buffer) {
       top = potentialTop;
     } else {
-      // Try placing it below the target span instead
-      // Use targetRect.bottom directly (viewport relative)
       top = targetRect.bottom + buffer;
-
-      // Check if placing below goes off the bottom edge
       if (top + tipRect.height > viewportHeight - buffer) {
-        // It doesn't fit below either. Place it as low as possible inside viewport.
         top = viewportHeight - tipRect.height - buffer;
-        // Final safety check: make sure it's not negative after adjustment
-        if (top < buffer) {
-          top = buffer;
-        }
+        if (top < buffer) top = buffer;
       }
     }
 
-    // Calculate potential left position (centered above/below target)
-    // Use targetRect.left directly (viewport relative)
     left = targetRect.left + (targetRect.width / 2) - (tipRect.width / 2);
 
-    // Check left boundary
-    if (left < buffer) {
-      left = buffer; // Pin to left edge (with buffer)
-    }
-
-    // Check right boundary
+    if (left < buffer) left = buffer;
     if (left + tipRect.width > viewportWidth - buffer) {
-      left = viewportWidth - tipRect.width - buffer; // Pin to right edge (with buffer)
+      left = viewportWidth - tipRect.width - buffer;
     }
 
-    // Apply the final calculated position (relative to viewport)
     tipElement.style.top = `${Math.round(top)}px`;
     tipElement.style.left = `${Math.round(left)}px`;
   }
@@ -268,53 +275,76 @@
 
   // --- Event Handlers ---
   function handlePhraseMouseEnter(event) {
-    // Ensure any previous hide timer is cleared before showing
     clearTimeout(tooltipTimeout);
     showTooltip(event.target);
   }
 
   function handlePhraseMouseLeave() {
-    // Delay hiding to allow moving cursor onto tooltip (though pointer-events:none makes it moot)
-    // or just slightly off the phrase without immediate flicker.
     clearTimeout(tooltipTimeout);
-    tooltipTimeout = setTimeout(hideTooltip, 150); // Adjust delay as needed
+    tooltipTimeout = setTimeout(hideTooltip, 150);
   }
 
   // --- Helper ---
   function escapeHtml(unsafe) {
     if (!unsafe) return '';
+    // Basic escaping, sufficient for text content
     return unsafe
-      .replace(/&/g, "&")
+      .replace(/&/g, "&") // Escape ampersand first
       .replace(/</g, "<")
       .replace(/>/g, ">")
       .replace(/"/g, "\"")
-      .replace(/'/g, "'");
+      .replace(/'/g, "'"); // Use HTML entity for single quote
   }
 
 
-  // --- Display Messages (Keep Original) ---
+  // --- Display Messages (Keep Original Logic) ---
   let messageTimeout;
   function displayMessage(message, type = 'info', persistent = false) {
-    injectAnnotationStyles();
+    injectAnnotationStyles(); // Ensure styles exist
     clearTimeout(messageTimeout);
     const tempMsgDiv = document.getElementById('annotator-message');
     if (tempMsgDiv) { tempMsgDiv.remove(); }
-    if (persistent) { hideProcessingMessage(false); }
+    if (persistent) { hideProcessingMessage(false); } // Hide previous persistent if showing new one
+
     const messageId = persistent ? 'annotator-processing-message' : 'annotator-message';
     let msgDiv = document.getElementById(messageId);
-    if (!msgDiv) { msgDiv = document.createElement('div'); msgDiv.id = messageId; document.body.appendChild(msgDiv); }
-    msgDiv.textContent = message; msgDiv.className = '';
-    msgDiv.classList.add(type);
-    requestAnimationFrame(() => { requestAnimationFrame(() => { msgDiv.classList.add('visible'); }); });
-    if (persistent) { processingMessageDiv = msgDiv; }
-    else { messageTimeout = setTimeout(() => { if (msgDiv) { msgDiv.classList.remove('visible'); msgDiv.addEventListener('transitionend', () => msgDiv.remove(), { once: true }); } }, 3500); }
+    if (!msgDiv) {
+      msgDiv = document.createElement('div');
+      msgDiv.id = messageId;
+      document.body.appendChild(msgDiv);
+    }
+
+    msgDiv.textContent = message;
+    msgDiv.className = ''; // Clear existing classes
+    msgDiv.classList.add(type); // Add the type class
+
+    // Force reflow before adding 'visible' for transition to work
+    void msgDiv.offsetWidth;
+
+    msgDiv.classList.add('visible');
+
+    if (persistent) {
+      processingMessageDiv = msgDiv; // Store reference if persistent
+    } else {
+      messageTimeout = setTimeout(() => {
+        if (msgDiv) {
+          msgDiv.classList.remove('visible');
+          // Remove element after transition finishes
+          msgDiv.addEventListener('transitionend', () => msgDiv.remove(), { once: true });
+          // Fallback removal in case transitionend doesn't fire
+          setTimeout(() => { if (msgDiv && !msgDiv.classList.contains('visible')) msgDiv.remove(); }, 500);
+        }
+      }, 3500); // Message display duration
+    }
   }
 
-  // --- Hide Persistent Processing Message (Keep Original) ---
+
+  // --- Hide Persistent Processing Message (Keep Original Logic) ---
   function hideProcessingMessage(clearTemporary = true) {
     if (processingMessageDiv) {
       processingMessageDiv.classList.remove('visible');
       processingMessageDiv.addEventListener('transitionend', () => processingMessageDiv && processingMessageDiv.remove(), { once: true });
+      // Fallback removal
       setTimeout(() => { if (processingMessageDiv && !processingMessageDiv.classList.contains('visible')) processingMessageDiv.remove(); }, 500);
       processingMessageDiv = null;
     }
@@ -325,49 +355,87 @@
     }
   }
 
-  // --- Message Listener (Keep Original) ---
+
+  // --- Message Listener (Keep Original Logic) ---
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log("Message received:", request.action);
     if (request.action === "showProcessing") {
-      clearPreviousAnnotations();
-      displayMessage("Processing page content with Gemini...", "info", true);
+      clearPreviousAnnotations(); // Clear old annotations before processing
+      displayMessage("Processing page content with Gemini...", "info", true); // Show persistent message
       sendResponse({ status: "Processing notification shown" });
-      return true;
+      return true; // Indicates async response
     }
     else if (request.action === "extractText") {
+      // Use try-catch block for robust error handling during extraction
       try {
-        if (typeof Readability === 'undefined') throw new Error("Readability library missing.");
-        const article = new Readability(document.cloneNode(true), { keepClasses: false, debug: false }).parse();
+        // Check if Readability library is loaded
+        if (typeof Readability === 'undefined') {
+          throw new Error("Readability library is not available.");
+        }
+
+        // Clone the document to avoid altering the live page during parsing
+        const documentClone = document.cloneNode(true);
+        const reader = new Readability(documentClone, {
+          // Options for Readability (optional, adjust as needed)
+          // keepClasses: false, // Keep or remove CSS classes
+          // debug: false, // Set to true for debugging logs
+        });
+        const article = reader.parse();
+
+        // Check if Readability successfully parsed content and it's substantial
         if (article && article.content && article.textContent.trim().length > 50) {
+          console.log("Readability extracted content successfully.");
+          // Attempt to find a more specific main content element for annotation context
           mainContentElement = document.querySelector('article, [role="main"], .post-content, .entry-content, #main-content, #content') || document.body;
           sendResponse({ textContent: article.textContent });
         } else {
-          mainContentElement = document.body;
-          const bodyText = document.body.innerText || "";
-          if (bodyText.trim().length > 100) { sendResponse({ textContent: bodyText }); }
-          else { throw new Error("Could not extract readable content."); }
+          // Fallback to using innerText of the body if Readability fails or yields little text
+          console.warn("Readability did not extract substantial content, falling back to body.innerText.");
+          mainContentElement = document.body; // Use body as context
+          const bodyText = document.body.innerText || ""; // Use innerText as it reflects rendered text
+          if (bodyText.trim().length > 100) { // Check if body text is substantial
+            sendResponse({ textContent: bodyText });
+          } else {
+            // If even body text is minimal, report an error
+            throw new Error("Could not extract sufficient readable content from the page.");
+          }
         }
       } catch (error) {
+        // Handle errors during extraction
         console.error("Extraction Error:", error);
         sendResponse({ error: `Extraction Error: ${error.message || String(error)}` });
-        hideProcessingMessage(); displayMessage(`Error: ${error.message || String(error)}`, "error");
-      } return true;
+        // Display error message to the user
+        hideProcessingMessage(); // Hide processing message if it was shown
+        displayMessage(`Error extracting content: ${error.message || 'Unknown extraction error'}`, "error");
+      }
+      return true; // Indicate async response
     }
     else if (request.action === "applyAnnotations") {
-      hideProcessingMessage();
+      hideProcessingMessage(); // Hide the "Processing..." message
+      // Ensure annotations is an array, default to empty if not
       const annotations = Array.isArray(request.annotations) ? request.annotations : [];
       applyAnnotations(annotations);
-      sendResponse({ status: "Annotations applied" }); return true;
+      sendResponse({ status: "Annotations applied" });
+      return true; // Indicate async response (though applyAnnotations is sync here)
     }
     else if (request.action === "showError") {
-      hideProcessingMessage(); console.error("Error from background:", request.error);
-      displayMessage(`Error: ${request.error || 'Unknown error'}`, 'error');
-      sendResponse({ status: "Error displayed" }); return true;
+      hideProcessingMessage(); // Hide processing message
+      console.error("Error received from background/popup:", request.error);
+      displayMessage(`Error: ${request.error || 'An unknown error occurred.'}`, 'error');
+      sendResponse({ status: "Error displayed" });
+      return true; // Indicate async response
     }
+    // Optional: Handle unknown actions
+    // else {
+    //  console.warn("Unknown action received:", request.action);
+    //  sendResponse({ status: "Unknown action ignored" });
+    // }
+    // Return false for synchronous messages if no async operation started
+    // return false;
   });
 
   // --- Initial Setup ---
-  injectAnnotationStyles();
+  injectAnnotationStyles(); // Ensure styles are present on load
   console.log("Annotator script initialization complete.");
 
 })(); // IIFE

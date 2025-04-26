@@ -14,22 +14,23 @@ async function callGeminiApi(apiKey, textContent) {
     console.error("Gemini API Key not set. Please set it in the extension options.");
     return { error: "API Key not configured." };
   }
-
-  // Prompt using backticks, balanced audience focus (UPDATED)
+  // Prompt using backticks, balanced audience focus, with Vietnamese Translation (UPDATED)
   const prompt = `Analyze the text below. Your goal is to be comprehensive yet discerning. Identify **all** phrases, terms (including technical jargon, acronyms, less common idioms or phrasal verbs, specific named entities like organizations or events if not widely known, and potentially ambiguous vocabulary) that **might be difficult or unfamiliar** to a **broad general audience**. This audience includes people with varying backgrounds and levels of familiarity with English, but assume a reasonable level of general knowledge.
 
 **Err on the side of inclusion, but focus on terms likely to impede understanding for non-specialists**: if a term *could* reasonably be unknown or less familiar to *some* members of a general audience (beyond the most common vocabulary and expressions), please include it.
 
 For each identified phrase, provide:
-1.  A concise explanation suitable for a brief tooltip (\`short_explanation\`), written in clear, accessible English.
-2.  A more detailed explanation exploring the concept (\`long_explanation\`), aiming for clarity and providing context or a simple example if helpful.
+1.  The original phrase (\`phrase\`).
+2.  A concise explanation suitable for a brief tooltip (\`short_explanation\`), written in clear, accessible English.
+3.  A more detailed explanation exploring the concept (\`long_explanation\`), aiming for clarity and providing context or a simple example if helpful, written in clear, accessible English.
+4.  A concise Vietnamese translation of the original phrase (\`vietnamese_translation\`).
 
-Respond ONLY with a single, valid JSON array containing objects. Each object must have exactly THREE string keys: "phrase", "short_explanation", and "long_explanation".
+Respond ONLY with a single, valid JSON array containing objects. Each object must have exactly FOUR string keys: "phrase", "short_explanation", "long_explanation", and "vietnamese_translation".
 Do not include any text before or after the JSON array. Do not use markdown formatting like backticks around the JSON block itself.
 If no potentially unfamiliar phrases are found, return an empty JSON array: [].
 
 Example Format:
-[{ "phrase": "fiscal quarter", "short_explanation": "A three-month period on a company's financial calendar.", "long_explanation": "A fiscal quarter is one of four three-month periods that make up a company's financial year. It's used for reporting financial results and performance. Unlike calendar quarters (Jan-Mar, etc.), a company's fiscal quarter can start in any month." }, { "phrase": "level playing field", "short_explanation": "A situation of fair competition.", "long_explanation": "The term 'level playing field' refers to fairness in competition, where no single competitor has an undue advantage or disadvantage. In trade, this often relates to removing subsidies or tariffs that favor domestic industries unfairly." }, { "phrase": "synergy", "short_explanation": "Combined effect greater than the sum of parts.", "long_explanation": "Synergy describes a situation where interacting elements (like departments in a company or different substances) produce a combined effect that is greater than the sum of their separate effects. For example, a merger might aim for synergy, hoping the combined company will be more profitable than the two were individually." } ] // Changed last example to be slightly more technical
+[{ "phrase": "fiscal quarter", "short_explanation": "A three-month period on a company's financial calendar.", "long_explanation": "A fiscal quarter is one of four three-month periods that make up a company's financial year. It's used for reporting financial results and performance. Unlike calendar quarters (Jan-Mar, etc.), a company's fiscal quarter can start in any month.", "vietnamese_translation": "quý tài chính" }, { "phrase": "level playing field", "short_explanation": "A situation of fair competition.", "long_explanation": "The term 'level playing field' refers to fairness in competition, where no single competitor has an undue advantage or disadvantage. In trade, this often relates to removing subsidies or tariffs that favor domestic industries unfairly.", "vietnamese_translation": "sân chơi bình đẳng" }, { "phrase": "synergy", "short_explanation": "Combined effect greater than the sum of parts.", "long_explanation": "Synergy describes a situation where interacting elements (like departments in a company or different substances) produce a combined effect that is greater than the sum of their separate effects. For example, a merger might aim for synergy, hoping the combined company will be more profitable than the two were individually.", "vietnamese_translation": "sức mạnh tổng hợp" } ]
 
 Text to analyze:
 ---
