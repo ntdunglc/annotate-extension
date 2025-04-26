@@ -7,184 +7,317 @@
 
   let mainContentElement = null;
   let processingMessageDiv = null;
+  let tooltipElement = null; // Reference to the single tooltip DIV
+  let tooltipTimeout = null; // To add slight delay on hide
 
-  // --- Helper to Find and Wrap Text ---
-  // Stores both explanations
+  // --- Helper to Find and Wrap Text (Keep Original Logic + Listeners) ---
   function findAndWrapText(contextNode, searchText, shortExplanation, longExplanation) {
     const walker = document.createTreeWalker(contextNode, NodeFilter.SHOW_TEXT, { acceptNode: (node) => { const p = node.parentNode.tagName.toUpperCase(); if (p === 'SCRIPT' || p === 'STYLE' || node.parentNode.classList.contains('annotated-phrase')) return NodeFilter.FILTER_REJECT; return node.nodeValue.trim().length > 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP; } });
     let node, foundCount = 0; const nodesToProcess = []; while (node = walker.nextNode()) nodesToProcess.push(node);
-    for (const textNode of nodesToProcess) {
-      if (!textNode.parentNode) continue; let matchIndex = textNode.nodeValue.indexOf(searchText);
+    for (var textNode of nodesToProcess) {
+      if (!textNode.parentNode || !textNode.nodeValue) continue;
+      let matchIndex = -1;
+      try {
+        matchIndex = textNode.nodeValue.indexOf(searchText);
+      } catch (e) { console.warn("Error finding text:", e, textNode, searchText); continue; }
+
       while (matchIndex !== -1) {
-        foundCount++; const matchEnd = matchIndex + searchText.length; const span = document.createElement('span'); span.className = 'annotated-phrase'; span.dataset.shortExplanation = shortExplanation; span.dataset.longExplanation = longExplanation; span.textContent = textNode.nodeValue.substring(matchIndex, matchEnd);
-        const afterTextNode = textNode.splitText(matchIndex); afterTextNode.nodeValue = afterTextNode.nodeValue.substring(searchText.length); textNode.parentNode.insertBefore(span, afterTextNode);
-        break; // Simple handling
+        foundCount++; const matchEnd = matchIndex + searchText.length; const span = document.createElement('span'); span.className = 'annotated-phrase';
+        span.dataset.shortExplanation = shortExplanation;
+        span.dataset.longExplanation = longExplanation;
+        span.textContent = textNode.nodeValue.substring(matchIndex, matchEnd);
+
+        try {
+          const afterTextNode = textNode.splitText(matchIndex);
+          afterTextNode.nodeValue = afterTextNode.nodeValue.substring(searchText.length);
+          textNode.parentNode.insertBefore(span, afterTextNode);
+          span.addEventListener('mouseenter', handlePhraseMouseEnter);
+          span.addEventListener('mouseleave', handlePhraseMouseLeave);
+          textNode = afterTextNode;
+          break;
+        } catch (e) { console.error("Error inserting span:", e); break; }
       }
     } return foundCount > 0;
   }
 
-  // --- Apply Annotations ---
+  // --- Apply Annotations (Keep Original) ---
   function applyAnnotations(annotations) {
-    // Note: hideProcessingMessage() is called before this function in the message listener
     console.log("Applying annotations:", annotations.length);
-    if (!mainContentElement) { mainContentElement = document.body; console.warn("Main content element not identified."); }
+    if (!mainContentElement) { mainContentElement = document.body; console.warn("Main content element not identified, using document.body."); }
     if (!annotations || annotations.length === 0) { displayMessage("No difficult phrases found.", "info"); return; }
-    clearPreviousAnnotations(); let appliedCount = 0;
+
+    injectAnnotationStyles();
+    clearPreviousAnnotations();
+
+    let appliedCount = 0;
     annotations.sort((a, b) => b.phrase.length - a.phrase.length);
-    annotations.forEach(annotation => { if (annotation.phrase && annotation.short_explanation && annotation.long_explanation && annotation.phrase.trim().length > 0) { try { if (findAndWrapText(mainContentElement, annotation.phrase, annotation.short_explanation, annotation.long_explanation)) appliedCount++; } catch (e) { console.error(`Error applying "${annotation.phrase}":`, e); } } else { console.warn("Skipping invalid annotation:", annotation); } });
+
+    annotations.forEach(annotation => {
+      if (annotation.phrase && annotation.short_explanation && annotation.long_explanation && annotation.phrase.trim().length > 0) {
+        try {
+          if (findAndWrapText(mainContentElement || document.body, annotation.phrase, annotation.short_explanation, annotation.long_explanation)) {
+            appliedCount++;
+          }
+        } catch (e) { console.error(`Error applying "${annotation.phrase}":`, e); }
+      } else { console.warn("Skipping invalid annotation:", annotation); }
+    });
     console.log("Applied count:", appliedCount);
-    if (appliedCount > 0) { injectAnnotationStyles(); displayMessage(`Annotated ${appliedCount} phrase(s).`, "success"); } else { displayMessage("Could not find phrases on page.", "warning"); }
+    if (appliedCount > 0) { displayMessage(`Annotated ${appliedCount} phrase(s). Hover over dotted text.`, "success"); }
+    else { displayMessage("Could not find the specific phrases on this page.", "warning"); }
   }
 
-  // --- Clear Previous Annotations ---
-  function clearPreviousAnnotations() { const existingSpans = (mainContentElement || document.body).querySelectorAll('span.annotated-phrase'); existingSpans.forEach(span => { const p = span.parentNode; p.replaceChild(document.createTextNode(span.textContent), span); p.normalize(); }); }
+  // --- Clear Previous Annotations (Keep Original) ---
+  function clearPreviousAnnotations() {
+    hideTooltip();
+    const container = mainContentElement || document.body;
+    const existingSpans = container.querySelectorAll('span.annotated-phrase');
+    existingSpans.forEach(span => {
+      span.removeEventListener('mouseenter', handlePhraseMouseEnter);
+      span.removeEventListener('mouseleave', handlePhraseMouseLeave);
+      const p = span.parentNode;
+      if (p) { p.replaceChild(document.createTextNode(span.textContent || ''), span); p.normalize(); }
+    });
+    console.log("Cleared previous annotations and listeners.");
+  }
 
-  // --- Inject CSS (CORRECTED STRING ASSIGNMENT) ---
+  // --- Inject CSS (Corrected String Escaping if needed, using Template Literal) ---
   function injectAnnotationStyles() {
     const styleId = 'annotator-styles';
     if (document.getElementById(styleId)) return;
 
-    // Use TEMPLATE LITERAL (backticks ) for the CSS string
+    // Use TEMPLATE LITERAL (backticks `) - this handles quotes correctly.
     const css = `
       .annotated-phrase {
         text-decoration: underline;
-        text-decoration-style: wavy;
-        text-decoration-color: #d32f2f; /* Bold red */
+        text-decoration-style: dotted;
+        text-decoration-color: #d32f2f;
         text-decoration-thickness: 1.5px;
         cursor: help;
-        position: relative;
         background-color: transparent;
       }
 
-      /* Tooltip container (Bigger + Combined Explanations) */
-      .annotated-phrase::after {
-        /* Combine short and long explanations. Use SINGLE backslash \A for line breaks */
-        content: attr(data-short-explanation) "\\A\\A---\\A" attr(data-long-explanation); /* Two line breaks before ---, one after */
-        white-space: pre-wrap; /* Crucial: Allows wrapping and respects \A */
-
-        position: absolute;
-        bottom: calc(100% + 10px); /* More space + arrow */
-        left: 50%;
-        transform: translateX(-50%);
+      #annotator-tooltip-element {
+        position: fixed;
+        display: none;
         width: auto;
-        min-width: 600px;
-        max-width: 650px;
-        background-color: #263238; /* Dark blue-gray */
-        color: #eceff1; /* Light text */
+        min-width: 250px;
+        max-width: 450px;
+        padding: 10px 12px;
+        background-color: #263238;
+        color: #eceff1;
         font-family: sans-serif;
-        font-size: 1.0em; /* Increased Font size */
-        line-height: 1.5; /* More line spacing */
+        font-size: 0.8em;
+        line-height: 1.4;
         text-align: left;
-        text-decoration: none;
-        padding: 12px 15px; /* Increased Padding */
         border-radius: 6px;
-        z-index: 100000;
+        z-index: 2147483647;
         pointer-events: none;
-        opacity: 0;
-        transition: opacity 0.25s ease-in-out;
         box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+        white-space: pre-wrap;
+        /* Add transition for opacity */
+        opacity: 0;
+        transition: opacity 0.1s ease-in-out;
       }
 
-      /* Tooltip arrow (Keep the same style as before) */
-      .annotated-phrase::before {
-          content: '';
-          position: absolute;
-          bottom: 100%;
-          left: 50%;
-          transform: translateX(-50%);
-          margin-bottom: 4px; /* Position arrow correctly */
-          border-width: 6px;
-          border-style: solid;
-          border-color: #263238 transparent transparent transparent; /* Match tooltip bg */
-          z-index: 10001; /* Above tooltip body slightly */
-          pointer-events: none;
-           opacity: 0;
-          transition: opacity 0.25s ease-in-out;
+      #annotator-tooltip-element.visible { /* Class to control visibility */
+          display: block;
+          opacity: 1;
+      }
+
+      #annotator-tooltip-element .short-explanation {
+           font-weight: bold; display: block; margin-bottom: 5px;
        }
+      #annotator-tooltip-element .explanation-separator {
+           display: block; height: 1px; background-color: #455a64; margin: 5px 0 8px 0;
+       }
+      #annotator-tooltip-element .long-explanation { display: block; }
 
-      .annotated-phrase:hover::before,
-      .annotated-phrase:hover::after {
-         opacity: 1;
+      #annotator-message, #annotator-processing-message {
+         position: fixed; top: 20px; right: 20px; padding: 12px 18px;
+         border-radius: 5px; color: white; font-family: sans-serif;
+         font-size: 14px; z-index: 2147483646; opacity: 0;
+         transition: opacity 0.4s ease-in-out; box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+         pointer-events: none;
       }
-
-      /* Notification messages (Shared Styles) */
-      #annotator-message, /* For temporary messages */
-      #annotator-processing-message {
-         position: fixed;
-         top: 20px;
-         right: 20px;
-         padding: 12px 18px;
-         border-radius: 5px;
-         color: white;
-         font-family: sans-serif;
-         font-size: 14px;
-         z-index: 10001;
-         opacity: 0;
-         transition: opacity 0.4s ease-in-out;
-         box-shadow: 0 2px 8px rgba(0,0,0,0.25);
-         pointer-events: none; /* Allow clicks through notification */
-      }
-
-      /* Make visible */
-      #annotator-message.visible,
-      #annotator-processing-message.visible {
-           opacity: 1;
-      }
-
-      /* Temporary Message Types */
+      #annotator-message.visible, #annotator-processing-message.visible { opacity: 1; }
       #annotator-message.success { background-color: #4CAF50; }
       #annotator-message.error { background-color: #f44336; }
       #annotator-message.warning { background-color: #ff9800; }
       #annotator-message.info { background-color: #2196F3; }
-
-      /* Persistent Processing Message Type */
-      #annotator-processing-message { background-color: #607d8b; } /* Blue Grey */
+      #annotator-processing-message { background-color: #607d8b; }
     `; // END OF TEMPLATE LITERAL
+
     const style = document.createElement('style');
     style.id = styleId;
+    // Use textContent which is generally safer and more performant than innerHTML for style tags
     style.textContent = css;
     document.head.appendChild(style);
+    console.log("Annotator styles injected/updated.");
   }
 
-  // --- Display Messages (Handles both temporary and persistent) ---
+  // --- Tooltip Handling Functions ---
+
+  function getOrCreateTooltipElement() {
+    tooltipElement = document.getElementById('annotator-tooltip-element');
+    if (!tooltipElement) {
+      tooltipElement = document.createElement('div');
+      tooltipElement.id = 'annotator-tooltip-element';
+      document.body.appendChild(tooltipElement);
+      console.log("Tooltip element created.");
+    }
+    return tooltipElement;
+  }
+
+  function showTooltip(targetSpan) {
+    const tip = getOrCreateTooltipElement();
+    clearTimeout(tooltipTimeout);
+
+    const shortExplanation = targetSpan.dataset.shortExplanation || '';
+    const longExplanation = targetSpan.dataset.longExplanation || '';
+
+    if (!shortExplanation && !longExplanation) return;
+
+    let htmlContent = '';
+    if (shortExplanation) htmlContent += `<span class="short-explanation">${escapeHtml(shortExplanation)}</span>`;
+    if (shortExplanation && longExplanation) htmlContent += `<span class="explanation-separator"></span>`;
+    if (longExplanation) htmlContent += `<span class="long-explanation">${escapeHtml(longExplanation)}</span>`;
+    tip.innerHTML = htmlContent;
+
+    // Make visible using class *before* calculating position
+    tip.classList.add('visible');
+
+    // Calculate and apply position
+    positionTooltip(targetSpan, tip);
+
+    // Opacity transition is handled by CSS (.visible class)
+    console.log("Showing tooltip for:", targetSpan.textContent);
+  }
+
+  function hideTooltip() {
+    if (tooltipElement) {
+      clearTimeout(tooltipTimeout); // Clear any pending hide actions
+      // Remove the visible class to trigger fade-out transition
+      tooltipElement.classList.remove('visible');
+      // We don't need display:none immediately because opacity 0 hides it,
+      // and pointer-events: none prevents interaction.
+      // Keeping display:block allows potential future transitions on properties like transform.
+      console.log("Hiding tooltip");
+    }
+  }
+
+  // *** REVISED positionTooltip Function ***
+  function positionTooltip(targetSpan, tip) {
+    const targetRect = targetSpan.getBoundingClientRect(); // Coords relative to viewport
+    const tipElement = tip; // Use the direct element reference
+
+    // Ensure tooltip is rendered (display: block) to get accurate dimensions
+    // This is now handled by adding '.visible' class *before* calling positionTooltip
+
+    const tipRect = tipElement.getBoundingClientRect(); // Get tooltip dimensions
+
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const buffer = 8; // Space between target and tooltip
+
+    let top, left;
+
+    // --- Position Strategy: Try above first, then below ---
+
+    // Calculate potential top position (above target)
+    // Use targetRect.top directly (viewport relative)
+    let potentialTop = targetRect.top - tipRect.height - buffer;
+
+    // Check if potential top position is within viewport
+    if (potentialTop >= buffer) { // Check if it fits above (with buffer)
+      top = potentialTop;
+    } else {
+      // Try placing it below the target span instead
+      // Use targetRect.bottom directly (viewport relative)
+      top = targetRect.bottom + buffer;
+
+      // Check if placing below goes off the bottom edge
+      if (top + tipRect.height > viewportHeight - buffer) {
+        // It doesn't fit below either. Place it as low as possible inside viewport.
+        top = viewportHeight - tipRect.height - buffer;
+        // Final safety check: make sure it's not negative after adjustment
+        if (top < buffer) {
+          top = buffer;
+        }
+      }
+    }
+
+    // Calculate potential left position (centered above/below target)
+    // Use targetRect.left directly (viewport relative)
+    left = targetRect.left + (targetRect.width / 2) - (tipRect.width / 2);
+
+    // Check left boundary
+    if (left < buffer) {
+      left = buffer; // Pin to left edge (with buffer)
+    }
+
+    // Check right boundary
+    if (left + tipRect.width > viewportWidth - buffer) {
+      left = viewportWidth - tipRect.width - buffer; // Pin to right edge (with buffer)
+    }
+
+    // Apply the final calculated position (relative to viewport)
+    tipElement.style.top = `${Math.round(top)}px`;
+    tipElement.style.left = `${Math.round(left)}px`;
+  }
+
+
+  // --- Event Handlers ---
+  function handlePhraseMouseEnter(event) {
+    // Ensure any previous hide timer is cleared before showing
+    clearTimeout(tooltipTimeout);
+    showTooltip(event.target);
+  }
+
+  function handlePhraseMouseLeave() {
+    // Delay hiding to allow moving cursor onto tooltip (though pointer-events:none makes it moot)
+    // or just slightly off the phrase without immediate flicker.
+    clearTimeout(tooltipTimeout);
+    tooltipTimeout = setTimeout(hideTooltip, 150); // Adjust delay as needed
+  }
+
+  // --- Helper ---
+  function escapeHtml(unsafe) {
+    if (!unsafe) return '';
+    return unsafe
+      .replace(/&/g, "&")
+      .replace(/</g, "<")
+      .replace(/>/g, ">")
+      .replace(/"/g, "\"")
+      .replace(/'/g, "'");
+  }
+
+
+  // --- Display Messages (Keep Original) ---
   let messageTimeout;
   function displayMessage(message, type = 'info', persistent = false) {
-    // Ensure styles are injected before showing any message
     injectAnnotationStyles();
-
-    // Clear any existing *temporary* message timeout and remove the temporary div immediately
     clearTimeout(messageTimeout);
     const tempMsgDiv = document.getElementById('annotator-message');
-    if (tempMsgDiv) {
-      tempMsgDiv.remove();
-    }
-
-    // If this is a persistent message, hide any existing persistent message first
-    if (persistent) {
-      hideProcessingMessage(false); // Hide without removing temporary messages again
-    }
-
+    if (tempMsgDiv) { tempMsgDiv.remove(); }
+    if (persistent) { hideProcessingMessage(false); }
     const messageId = persistent ? 'annotator-processing-message' : 'annotator-message';
-
-    // Get or create the appropriate message div
     let msgDiv = document.getElementById(messageId);
     if (!msgDiv) { msgDiv = document.createElement('div'); msgDiv.id = messageId; document.body.appendChild(msgDiv); }
-
-    msgDiv.textContent = message; msgDiv.className = type; // Reset classes first
+    msgDiv.textContent = message; msgDiv.className = '';
+    msgDiv.classList.add(type);
     requestAnimationFrame(() => { requestAnimationFrame(() => { msgDiv.classList.add('visible'); }); });
     if (persistent) { processingMessageDiv = msgDiv; }
     else { messageTimeout = setTimeout(() => { if (msgDiv) { msgDiv.classList.remove('visible'); msgDiv.addEventListener('transitionend', () => msgDiv.remove(), { once: true }); } }, 3500); }
   }
 
-  // --- Hide Persistent Processing Message ---
+  // --- Hide Persistent Processing Message (Keep Original) ---
   function hideProcessingMessage(clearTemporary = true) {
     if (processingMessageDiv) {
       processingMessageDiv.classList.remove('visible');
-      // Remove from DOM after fade out
       processingMessageDiv.addEventListener('transitionend', () => processingMessageDiv && processingMessageDiv.remove(), { once: true });
+      setTimeout(() => { if (processingMessageDiv && !processingMessageDiv.classList.contains('visible')) processingMessageDiv.remove(); }, 500);
       processingMessageDiv = null;
     }
-    // Option to also clear any lingering temporary message (used when showing final status)
     if (clearTemporary) {
       clearTimeout(messageTimeout);
       const tempMsg = document.getElementById('annotator-message');
@@ -192,30 +325,49 @@
     }
   }
 
-  // --- Message Listener ---
+  // --- Message Listener (Keep Original) ---
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === "showProcessing") { displayMessage("Processing page content with Gemini...", "info", true); sendResponse({ status: "Processing notification shown" }); return true; }
+    console.log("Message received:", request.action);
+    if (request.action === "showProcessing") {
+      clearPreviousAnnotations();
+      displayMessage("Processing page content with Gemini...", "info", true);
+      sendResponse({ status: "Processing notification shown" });
+      return true;
+    }
     else if (request.action === "extractText") {
       try {
         if (typeof Readability === 'undefined') throw new Error("Readability library missing.");
         const article = new Readability(document.cloneNode(true), { keepClasses: false, debug: false }).parse();
-        if (article && article.content && article.textContent.trim().length > 50) { mainContentElement = document.querySelector('article, [role="main"], .post-content, .entry-content, #main-content, #content') || document.body; sendResponse({ textContent: article.textContent }); }
-        else { mainContentElement = document.body; const bodyText = document.body.innerText || ""; if (bodyText.trim().length > 100) { sendResponse({ textContent: bodyText }); } else { throw new Error("Could not extract readable content."); } }
-      } catch (error) { console.error("Extraction Error:", error); sendResponse({ error: `Extraction Error: ${error.message}` }); hideProcessingMessage(); displayMessage(`Error: ${error.message}`, "error"); } return true;
+        if (article && article.content && article.textContent.trim().length > 50) {
+          mainContentElement = document.querySelector('article, [role="main"], .post-content, .entry-content, #main-content, #content') || document.body;
+          sendResponse({ textContent: article.textContent });
+        } else {
+          mainContentElement = document.body;
+          const bodyText = document.body.innerText || "";
+          if (bodyText.trim().length > 100) { sendResponse({ textContent: bodyText }); }
+          else { throw new Error("Could not extract readable content."); }
+        }
+      } catch (error) {
+        console.error("Extraction Error:", error);
+        sendResponse({ error: `Extraction Error: ${error.message || String(error)}` });
+        hideProcessingMessage(); displayMessage(`Error: ${error.message || String(error)}`, "error");
+      } return true;
     }
     else if (request.action === "applyAnnotations") {
-      // Hide processing message *before* applying annotations and showing final status
       hideProcessingMessage();
-      applyAnnotations(request.annotations); // This function now also calls displayMessage
+      const annotations = Array.isArray(request.annotations) ? request.annotations : [];
+      applyAnnotations(annotations);
       sendResponse({ status: "Annotations applied" }); return true;
     }
     else if (request.action === "showError") {
-      hideProcessingMessage(); // Hide processing message first
-      console.error("Error from background:", request.error);
-      displayMessage(`Error: ${request.error}`, 'error'); // Show temporary error
+      hideProcessingMessage(); console.error("Error from background:", request.error);
+      displayMessage(`Error: ${request.error || 'Unknown error'}`, 'error');
       sendResponse({ status: "Error displayed" }); return true;
     }
-    // Return false or undefined for unhandled actions
   });
+
+  // --- Initial Setup ---
+  injectAnnotationStyles();
+  console.log("Annotator script initialization complete.");
 
 })(); // IIFE
