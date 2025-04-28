@@ -1,9 +1,12 @@
 // /Users/dungnguyen/workspace/annotate-extension/content_script.js
 (() => {
   // Prevent multiple runs
-  if (window.hasRunAnnotatorScript) return;
+  if (window.hasRunAnnotatorScript) {
+    console.log("Annotator content script already running.");
+    return;
+  }
   window.hasRunAnnotatorScript = true;
-  console.log("Annotator content script loaded.");
+  console.log("Annotator content script loaded/re-injected."); // Log changed slightly
 
   let mainContentElement = null;
   let processingMessageDiv = null;
@@ -11,7 +14,7 @@
   let tooltipTimeout = null; // To add slight delay on hide
 
   // --- Helper to Find and Wrap Text ---
-  // MODIFIED: Added vietnameseTranslation parameter
+  // (Keep this function as is - the NodeFilter already prevents re-wrapping)
   function findAndWrapText(contextNode, searchText, shortExplanation, longExplanation, vietnameseTranslation) {
     const walker = document.createTreeWalker(contextNode, NodeFilter.SHOW_TEXT, { acceptNode: (node) => { const p = node.parentNode.tagName.toUpperCase(); if (p === 'SCRIPT' || p === 'STYLE' || node.parentNode.classList.contains('annotated-phrase')) return NodeFilter.FILTER_REJECT; return node.nodeValue.trim().length > 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP; } });
     let node, foundCount = 0; const nodesToProcess = []; while (node = walker.nextNode()) nodesToProcess.push(node);
@@ -19,6 +22,7 @@
       if (!textNode.parentNode || !textNode.nodeValue) continue;
       let matchIndex = -1;
       try {
+        // Use a case-insensitive search? For now, keep it case-sensitive as the LLM likely returns the exact phrase.
         matchIndex = textNode.nodeValue.indexOf(searchText);
       } catch (e) { console.warn("Error finding text:", e, textNode, searchText); continue; }
 
@@ -26,7 +30,6 @@
         foundCount++; const matchEnd = matchIndex + searchText.length; const span = document.createElement('span'); span.className = 'annotated-phrase';
         span.dataset.shortExplanation = shortExplanation;
         span.dataset.longExplanation = longExplanation;
-        // ADDED: Store Vietnamese translation in dataset
         span.dataset.vietnameseTranslation = vietnameseTranslation;
         span.textContent = textNode.nodeValue.substring(matchIndex, matchEnd);
 
@@ -37,31 +40,44 @@
           span.addEventListener('mouseenter', handlePhraseMouseEnter);
           span.addEventListener('mouseleave', handlePhraseMouseLeave);
           textNode = afterTextNode;
-          break;
-        } catch (e) { console.error("Error inserting span:", e); break; }
+          // Find next occurrence in the *rest* of the text node
+          matchIndex = textNode.nodeValue.indexOf(searchText);
+          // break; // Original code had break, let's allow multiple matches in one node
+        } catch (e) { console.error("Error inserting span:", e); matchIndex = -1; /* Stop trying in this node on error */ }
       }
     } return foundCount > 0;
   }
 
-  // --- Apply Annotations ---
-  function applyAnnotations(annotations) {
-    console.log("Applying annotations:", annotations.length);
-    if (!mainContentElement) { mainContentElement = document.body; console.warn("Main content element not identified, using document.body."); }
-    if (!annotations || annotations.length === 0) { displayMessage("No difficult phrases found.", "info"); return; }
+  // --- Apply Annotations (MODIFIED: No longer clears previous) ---
+  function applyAnnotations(annotations, isSelection) {
+    console.log(`Applying ${annotations.length} annotations. From selection: ${isSelection}`);
+    // Determine the context. If it was a selection, we might want a more specific context
+    // but for now, using the previously determined mainContentElement or body is fine.
+    if (!mainContentElement) {
+      // Try to find a reasonable context if not already set (e.g., if only selection was processed)
+      mainContentElement = document.querySelector('article, [role="main"], .post-content, .entry-content, #main-content, #content') || document.body;
+      console.warn("Main content element fallback triggered in applyAnnotations, using:", mainContentElement.tagName);
+    }
+    const context = mainContentElement || document.body;
+
+    if (!annotations || annotations.length === 0) {
+      displayMessage("No difficult phrases found in the provided text.", "info");
+      return;
+    }
 
     injectAnnotationStyles();
-    clearPreviousAnnotations();
+    // clearPreviousAnnotations(); // <<<--- REMOVED THIS LINE
 
     let appliedCount = 0;
+    // Sort by length descending to match longer phrases first
     annotations.sort((a, b) => b.phrase.length - a.phrase.length);
 
     annotations.forEach(annotation => {
-      // MODIFIED: Check for vietnamese_translation as well (assuming it's required)
+      // ADDED: Check for vietnamese_translation field existence
       if (annotation.phrase && annotation.short_explanation && annotation.long_explanation && annotation.vietnamese_translation && annotation.phrase.trim().length > 0) {
         try {
-          // MODIFIED: Pass vietnamese_translation to findAndWrapText
           if (findAndWrapText(
-            mainContentElement || document.body,
+            context, // Use the determined context
             annotation.phrase,
             annotation.short_explanation,
             annotation.long_explanation,
@@ -72,26 +88,46 @@
         } catch (e) { console.error(`Error applying "${annotation.phrase}":`, e); }
       } else { console.warn("Skipping invalid or incomplete annotation:", annotation); }
     });
-    console.log("Applied count:", appliedCount);
-    if (appliedCount > 0) { displayMessage(`Annotated ${appliedCount} phrase(s). Hover over dotted text.`, "success"); }
-    else { displayMessage("Could not find the specific phrases on this page.", "warning"); }
+    console.log("Applied count for this run:", appliedCount);
+    if (appliedCount > 0) {
+      displayMessage(`Annotated ${appliedCount} new phrase(s). Hover over dotted text.`, "success");
+    } else {
+      // This message might be confusing if annotations already exist but none were found *in this specific text*
+      displayMessage("Could not find the specific phrases from the analysis on this page.", "warning");
+    }
   }
 
-  // --- Clear Previous Annotations (Keep Original) ---
+  // --- Clear Previous Annotations (Keep function, but don't call automatically) ---
   function clearPreviousAnnotations() {
     hideTooltip();
-    const container = mainContentElement || document.body;
+    // Use body as the ultimate container to find all spans, regardless of original context
+    const container = document.body;
     const existingSpans = container.querySelectorAll('span.annotated-phrase');
     existingSpans.forEach(span => {
       span.removeEventListener('mouseenter', handlePhraseMouseEnter);
       span.removeEventListener('mouseleave', handlePhraseMouseLeave);
       const p = span.parentNode;
-      if (p) { p.replaceChild(document.createTextNode(span.textContent || ''), span); p.normalize(); }
+      if (p) {
+        try {
+          // Replace the span with its text content
+          p.replaceChild(document.createTextNode(span.textContent || ''), span);
+          p.normalize(); // Merges adjacent text nodes
+        } catch (e) {
+          console.warn("Could not cleanly remove annotation span:", e, span);
+          // Fallback: just remove the span if replacement fails
+          if (span.parentNode) {
+            span.remove();
+          }
+        }
+      } else {
+        // If span has no parent (shouldn't happen often), just remove listeners
+        span.remove();
+      }
     });
     console.log("Cleared previous annotations and listeners.");
   }
 
-  // --- Inject CSS ---
+  // --- Inject CSS (Keep as is) ---
   function injectAnnotationStyles() {
     const styleId = 'annotator-styles';
     if (document.getElementById(styleId)) return;
@@ -104,7 +140,15 @@
         text-decoration-thickness: 1.5px;
         cursor: help;
         background-color: transparent;
+        /* Add position relative if needed for pseudo-elements later, but not now */
       }
+
+      /* Add a subtle visual difference for selection-based annotations? Optional */
+      /*
+      .annotated-phrase[data-from-selection="true"] {
+         text-decoration-color: #1976D2;
+      }
+      */
 
       #annotator-tooltip-element {
         position: fixed;
@@ -178,7 +222,7 @@
     style.id = styleId;
     style.textContent = css;
     document.head.appendChild(style);
-    console.log("Annotator styles injected/updated.");
+    // console.log("Annotator styles injected/updated."); // Less noisy log
   }
 
   // --- Tooltip Handling Functions ---
@@ -243,33 +287,42 @@
   function positionTooltip(targetSpan, tip) {
     const targetRect = targetSpan.getBoundingClientRect();
     const tipElement = tip;
-    const tipRect = tipElement.getBoundingClientRect();
-    const viewportWidth = window.innerWidth;
-    const viewportHeight = window.innerHeight;
-    const buffer = 8;
+    // Ensure tipRect is fetched *after* content is set and it's potentially visible (though opacity=0)
+    // Re-fetch it here in case content changed size drastically
+    requestAnimationFrame(() => { // Wait for potential reflow after content change
+      const tipRect = tipElement.getBoundingClientRect();
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const buffer = 8;
 
-    let top, left;
-    let potentialTop = targetRect.top - tipRect.height - buffer;
+      let top, left;
+      // Try placing above first
+      let potentialTop = targetRect.top - tipRect.height - buffer;
 
-    if (potentialTop >= buffer) {
-      top = potentialTop;
-    } else {
-      top = targetRect.bottom + buffer;
-      if (top + tipRect.height > viewportHeight - buffer) {
-        top = viewportHeight - tipRect.height - buffer;
-        if (top < buffer) top = buffer;
+      if (potentialTop >= buffer) { // Fits above?
+        top = potentialTop;
+        } else { // Doesn't fit above, try below
+          top = targetRect.bottom + buffer;
+          // Doesn't fit below either? Place at bottom edge of viewport.
+          if (top + tipRect.height > viewportHeight - buffer) {
+            top = viewportHeight - tipRect.height - buffer;
+            // If it's still too tall for viewport, place at top edge.
+            if (top < buffer) top = buffer;
+          }
+        }
+
+      // Center horizontally relative to the target span
+      left = targetRect.left + (targetRect.width / 2) - (tipRect.width / 2);
+
+      // Keep within viewport horizontally
+      if (left < buffer) left = buffer;
+      if (left + tipRect.width > viewportWidth - buffer) {
+        left = viewportWidth - tipRect.width - buffer;
       }
-    }
 
-    left = targetRect.left + (targetRect.width / 2) - (tipRect.width / 2);
-
-    if (left < buffer) left = buffer;
-    if (left + tipRect.width > viewportWidth - buffer) {
-      left = viewportWidth - tipRect.width - buffer;
-    }
-
-    tipElement.style.top = `${Math.round(top)}px`;
-    tipElement.style.left = `${Math.round(left)}px`;
+      tipElement.style.top = `${Math.round(top)}px`;
+      tipElement.style.left = `${Math.round(left)}px`;
+    });
   }
 
 
@@ -297,7 +350,7 @@
   }
 
 
-  // --- Display Messages (Keep Original Logic) ---
+  // --- Display Messages (MODIFIED slightly for custom message) ---
   let messageTimeout;
   function displayMessage(message, type = 'info', persistent = false) {
     injectAnnotationStyles(); // Ensure styles exist
@@ -314,36 +367,32 @@
       document.body.appendChild(msgDiv);
     }
 
-    msgDiv.textContent = message;
+    msgDiv.textContent = message; // Use the provided message
     msgDiv.className = ''; // Clear existing classes
     msgDiv.classList.add(type); // Add the type class
 
-    // Force reflow before adding 'visible' for transition to work
     void msgDiv.offsetWidth;
-
     msgDiv.classList.add('visible');
 
     if (persistent) {
-      processingMessageDiv = msgDiv; // Store reference if persistent
+      processingMessageDiv = msgDiv;
     } else {
       messageTimeout = setTimeout(() => {
         if (msgDiv) {
           msgDiv.classList.remove('visible');
-          // Remove element after transition finishes
-          msgDiv.addEventListener('transitionend', () => msgDiv.remove(), { once: true });
-          // Fallback removal in case transitionend doesn't fire
+          msgDiv.addEventListener('transitionend', () => { if (msgDiv) msgDiv.remove(); }, { once: true }); // Safer remove
           setTimeout(() => { if (msgDiv && !msgDiv.classList.contains('visible')) msgDiv.remove(); }, 500);
         }
-      }, 3500); // Message display duration
+      }, 3500);
     }
   }
 
 
-  // --- Hide Persistent Processing Message (Keep Original Logic) ---
+  // --- Hide Persistent Processing Message (Keep as is) ---
   function hideProcessingMessage(clearTemporary = true) {
     if (processingMessageDiv) {
       processingMessageDiv.classList.remove('visible');
-      processingMessageDiv.addEventListener('transitionend', () => processingMessageDiv && processingMessageDiv.remove(), { once: true });
+      processingMessageDiv.addEventListener('transitionend', () => { if (processingMessageDiv) processingMessageDiv.remove(); }, { once: true }); // Safer remove
       // Fallback removal
       setTimeout(() => { if (processingMessageDiv && !processingMessageDiv.classList.contains('visible')) processingMessageDiv.remove(); }, 500);
       processingMessageDiv = null;
@@ -356,86 +405,96 @@
   }
 
 
-  // --- Message Listener (Keep Original Logic) ---
+  // --- Message Listener (UPDATED) ---
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    console.log("Message received:", request.action);
-    if (request.action === "showProcessing") {
-      clearPreviousAnnotations(); // Clear old annotations before processing
-      displayMessage("Processing page content with Gemini...", "info", true); // Show persistent message
+    console.log("Content Script: Message received:", request.action);
+
+    if (request.action === "getTextOrSelection") {
+      const selectedText = window.getSelection().toString().trim();
+      if (selectedText) {
+        console.log("Content Script: Selection found:", selectedText.length);
+        // Determine context later if needed, for now just send text
+        sendResponse({ selectedText: selectedText });
+      } else {
+        console.log("Content Script: No text selected.");
+        sendResponse({ selectedText: null }); // Signal no selection
+      }
+      return true; // Indicate potential async response (though it's sync here)
+    }
+    else if (request.action === "showProcessing") {
+      // Use the message from the background script if provided
+      const messageText = request.message || "Processing page content with Gemini...";
+      // DON'T clear annotations here anymore
+      // clearPreviousAnnotations();
+      displayMessage(messageText, "info", true); // Show persistent message
       sendResponse({ status: "Processing notification shown" });
-      return true; // Indicates async response
+      return true;
     }
     else if (request.action === "extractText") {
-      // Use try-catch block for robust error handling during extraction
       try {
-        // Check if Readability library is loaded
         if (typeof Readability === 'undefined') {
-          throw new Error("Readability library is not available.");
+          // Send specific error if Readability wasn't injected
+          sendResponse({ error: "Extraction Error: Readability script not loaded." });
+          hideProcessingMessage();
+          displayMessage("Error extracting content: Readability script missing.", "error");
+          return true; // Indicate response sent
         }
-
-        // Clone the document to avoid altering the live page during parsing
         const documentClone = document.cloneNode(true);
-        const reader = new Readability(documentClone, {
-          // Options for Readability (optional, adjust as needed)
-          // keepClasses: false, // Keep or remove CSS classes
-          // debug: false, // Set to true for debugging logs
-        });
+        const reader = new Readability(documentClone, {});
         const article = reader.parse();
 
-        // Check if Readability successfully parsed content and it's substantial
         if (article && article.content && article.textContent.trim().length > 50) {
-          console.log("Readability extracted content successfully.");
-          // Attempt to find a more specific main content element for annotation context
+          console.log("Content Script: Readability extracted content.");
+          // Set mainContentElement for annotation context *before* sending response
           mainContentElement = document.querySelector('article, [role="main"], .post-content, .entry-content, #main-content, #content') || document.body;
           sendResponse({ textContent: article.textContent });
         } else {
-          // Fallback to using innerText of the body if Readability fails or yields little text
-          console.warn("Readability did not extract substantial content, falling back to body.innerText.");
-          mainContentElement = document.body; // Use body as context
-          const bodyText = document.body.innerText || ""; // Use innerText as it reflects rendered text
-          if (bodyText.trim().length > 100) { // Check if body text is substantial
+          console.warn("Content Script: Readability failed, falling back to body.innerText.");
+          mainContentElement = document.body; // Fallback context
+          const bodyText = document.body.innerText || "";
+          if (bodyText.trim().length > 100) {
             sendResponse({ textContent: bodyText });
           } else {
-            // If even body text is minimal, report an error
-            throw new Error("Could not extract sufficient readable content from the page.");
+            throw new Error("Could not extract sufficient readable content.");
           }
         }
       } catch (error) {
-        // Handle errors during extraction
-        console.error("Extraction Error:", error);
+        console.error("Content Script: Extraction Error:", error);
         sendResponse({ error: `Extraction Error: ${error.message || String(error)}` });
-        // Display error message to the user
-        hideProcessingMessage(); // Hide processing message if it was shown
+        hideProcessingMessage();
         displayMessage(`Error extracting content: ${error.message || 'Unknown extraction error'}`, "error");
       }
       return true; // Indicate async response
     }
     else if (request.action === "applyAnnotations") {
       hideProcessingMessage(); // Hide the "Processing..." message
-      // Ensure annotations is an array, default to empty if not
       const annotations = Array.isArray(request.annotations) ? request.annotations : [];
-      applyAnnotations(annotations);
+      // Pass the isSelection flag
+      applyAnnotations(annotations, request.isSelection || false);
       sendResponse({ status: "Annotations applied" });
-      return true; // Indicate async response (though applyAnnotations is sync here)
+      return true;
     }
     else if (request.action === "showError") {
-      hideProcessingMessage(); // Hide processing message
-      console.error("Error received from background/popup:", request.error);
+      hideProcessingMessage();
+      console.error("Content Script: Error received:", request.error);
       displayMessage(`Error: ${request.error || 'An unknown error occurred.'}`, 'error');
       sendResponse({ status: "Error displayed" });
-      return true; // Indicate async response
+      return true;
     }
-    // Optional: Handle unknown actions
-    // else {
-    //  console.warn("Unknown action received:", request.action);
-    //  sendResponse({ status: "Unknown action ignored" });
+    // Optional: Add action to explicitly clear annotations if desired later
+    // else if (request.action === "clearAllAnnotations") {
+    //    clearPreviousAnnotations();
+    //    displayMessage("Annotations cleared.", "info");
+    //    sendResponse({ status: "Annotations cleared"});
+    //    return true;
     // }
-    // Return false for synchronous messages if no async operation started
-    // return false;
+
+    console.warn(`Content Script: Unknown action received: ${request.action}`);
+    // Return false or nothing for unhandled synchronous messages
   });
 
   // --- Initial Setup ---
   injectAnnotationStyles(); // Ensure styles are present on load
-  console.log("Annotator script initialization complete.");
+  console.log("Annotator content script initialization complete.");
 
 })(); // IIFE
