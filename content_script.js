@@ -222,9 +222,9 @@
     console.log(`Cleared ${clearedCount} previous annotation spans.`);
     // Optionally display a message
     if (clearedCount > 0) {
-      // displayMessage(`Cleared ${clearedCount} annotations.`, "info");
+      displayMessage(`Cleared ${clearedCount} annotation(s).`, "info");
     } else {
-      // displayMessage("No annotations found to clear.", "info");
+      displayMessage("No annotations found to clear.", "info");
     }
   }
 
@@ -595,13 +595,11 @@
       sendResponse({ status: "Error displayed" });
       return true;
     }
-    // Optional: Add action to explicitly clear annotations if desired later
-    // else if (request.action === "clearAllAnnotations") {
-    //    clearPreviousAnnotations();
-    //    // displayMessage("Annotations cleared.", "info"); // Message now shown inside clear function
-    //    sendResponse({ status: "Annotations cleared"});
-    //    return true;
-    // }
+    else if (request.action === "clearAllAnnotations") {
+      clearPreviousAnnotations();
+      sendResponse({ status: "Annotations cleared" });
+      return true;
+    }
 
     console.warn(`Content Script: Unknown action received: ${request.action}`);
     // Return false or nothing for unhandled synchronous messages

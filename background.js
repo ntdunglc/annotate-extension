@@ -172,7 +172,117 @@ ${textContent}
   }
 }
 
-// --- Action Button Click Listener (UPDATED) ---
+// --- Helper function to show the processing message (avoids code duplication) ---
+function displayProcessingMessage(tabId, message) {
+  console.log("Sending 'showProcessing' message:", message);
+  chrome.tabs.sendMessage(tabId, { action: "showProcessing", message: message }, (response) => {
+    if (chrome.runtime.lastError) {
+      console.warn("Could not send 'showProcessing' message:", chrome.runtime.lastError.message);
+    } else {
+      console.log("Processing notification sent to content script.");
+    }
+  });
+}
+
+// --- Reusable Annotation Functions ---
+async function annotateSelection(tabId, selectedText) {
+  const apiKey = await getApiKey();
+  if (!apiKey) {
+    console.log("API Key missing, opening options.");
+    chrome.runtime.openOptionsPage();
+    return;
+  }
+
+  displayProcessingMessage(tabId, "Processing selected text with Gemini...");
+
+  try {
+    const result = await callGeminiApi(apiKey, selectedText);
+    if (result.error) {
+      console.error("Gemini API call failed for selection:", result.error);
+      chrome.tabs.sendMessage(tabId, { action: "showError", error: `Gemini Error: ${result.error}` });
+    } else if (result.annotations) {
+      console.log("Sending annotations for selection:", result.annotations.length);
+      chrome.tabs.sendMessage(tabId, { action: "applyAnnotations", annotations: result.annotations, isSelection: true });
+    } else {
+      console.warn("Gemini API OK (selection) but no annotations or unexpected structure.");
+      chrome.tabs.sendMessage(tabId, { action: "showError", error: "Gemini returned success but no annotations for selection." });
+    }
+  } catch (err) {
+    console.error("Error in annotateSelection:", err);
+    chrome.tabs.sendMessage(tabId, { action: "showError", error: `Internal Error: ${err.message}` });
+  }
+}
+
+async function annotatePage(tabId) {
+  const apiKey = await getApiKey();
+  if (!apiKey) {
+    console.log("API Key missing, opening options.");
+    chrome.runtime.openOptionsPage();
+    return;
+  }
+
+  displayProcessingMessage(tabId, "Processing page content with Gemini...");
+
+  try {
+    console.log("Injecting Readability.js...");
+    await chrome.scripting.executeScript({ target: { tabId: tabId }, files: ['Readability.js'] });
+    console.log("Readability injected. Sending 'extractText' message...");
+    
+    chrome.tabs.sendMessage(tabId, { action: "extractText" }, async (extractResponse) => {
+      if (chrome.runtime.lastError) {
+        console.error("Error sending 'extractText':", chrome.runtime.lastError.message);
+        chrome.tabs.sendMessage(tabId, { action: "showError", error: `Comms Error (ExtractText): ${chrome.runtime.lastError.message}` });
+        return;
+      }
+
+      if (extractResponse && extractResponse.error) {
+        console.error("Extraction error:", extractResponse.error);
+        chrome.tabs.sendMessage(tabId, { action: "showError", error: `Extraction Error: ${extractResponse.error}` });
+        return;
+      }
+
+      if (extractResponse && extractResponse.textContent) {
+        console.log("Received text content length:", extractResponse.textContent.length);
+        const result = await callGeminiApi(apiKey, extractResponse.textContent);
+        if (result.error) {
+          console.error("Gemini API call failed:", result.error);
+          chrome.tabs.sendMessage(tabId, { action: "showError", error: `Gemini Error: ${result.error}` });
+        } else if (result.annotations) {
+          console.log("Sending annotations:", result.annotations.length);
+          chrome.tabs.sendMessage(tabId, { action: "applyAnnotations", annotations: result.annotations, isSelection: false });
+        } else {
+          console.warn("Gemini API OK but no annotations or unexpected structure.");
+          chrome.tabs.sendMessage(tabId, { action: "showError", error: "Gemini returned success but no annotations." });
+        }
+      } else {
+        console.warn("No text content received after Readability.");
+        chrome.tabs.sendMessage(tabId, { action: "showError", error: "Could not extract readable content from the page." });
+      }
+    });
+  } catch (err) {
+    console.error("Failed to inject Readability.js:", err);
+    chrome.tabs.sendMessage(tabId, { action: "showError", error: `Script Injection Error (Readability): ${err.message}` });
+  }
+}
+
+async function clearAnnotations(tabId) {
+  try {
+    console.log("Injecting content_script.js for clearing...");
+    await chrome.scripting.executeScript({ target: { tabId: tabId }, files: ['content_script.js'] });
+    console.log("Sending 'clearAllAnnotations' message...");
+    chrome.tabs.sendMessage(tabId, { action: "clearAllAnnotations" }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn("Could not send 'clearAllAnnotations' message:", chrome.runtime.lastError.message);
+      } else {
+        console.log("Cleared annotations request processed.");
+      }
+    });
+  } catch (err) {
+    console.error("Failed to inject or clear annotations:", err);
+  }
+}
+
+// --- Action Button Click Listener ---
 chrome.action.onClicked.addListener(async (tab) => {
   console.log("Action clicked, Tab ID:", tab.id);
   const apiKey = await getApiKey();
@@ -182,106 +292,99 @@ chrome.action.onClicked.addListener(async (tab) => {
     return;
   }
 
-  // Inject only the content script first to check for selection
   try {
     console.log("Injecting content_script.js...");
-    // Ensure file exists at this path in your extension package
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content_script.js'] });
     console.log("Content script injected.");
 
-    // Ask content script for selected text OR signal to extract full page
     console.log("Sending 'getTextOrSelection' message...");
-    chrome.tabs.sendMessage(tab.id, { action: "getTextOrSelection" }, (response) => {
+    chrome.tabs.sendMessage(tab.id, { action: "getTextOrSelection" }, async (response) => {
       if (chrome.runtime.lastError) {
         console.error("Error checking selection:", chrome.runtime.lastError.message);
-         chrome.tabs.sendMessage(tab.id, { action: "showError", error: `Comms Error (Selection Check): ${chrome.runtime.lastError.message}` });
+        chrome.tabs.sendMessage(tab.id, { action: "showError", error: `Comms Error (Selection Check): ${chrome.runtime.lastError.message}` });
         return;
       }
 
       if (response && typeof response.selectedText === 'string' && response.selectedText.length > 0) {
-        // --- Text IS Selected ---
         console.log("Received selected text length:", response.selectedText.length);
-        displayProcessingMessage(tab.id, "Processing selected text with Gemini...");
-
-        callGeminiApi(apiKey, response.selectedText).then(result => {
-          if (result.error) {
-            console.error("Gemini API call failed for selection:", result.error);
-            chrome.tabs.sendMessage(tab.id, { action: "showError", error: `Gemini Error: ${result.error}` });
-          } else if (result.annotations) {
-            console.log("Sending annotations for selection:", result.annotations.length);
-             chrome.tabs.sendMessage(tab.id, { action: "applyAnnotations", annotations: result.annotations, isSelection: true });
-          } else {
-            console.warn("Gemini API OK (selection) but no annotations or unexpected structure.");
-            chrome.tabs.sendMessage(tab.id, { action: "showError", error: "Gemini returned success but no annotations for selection." });
-          }
-        });
-
-      } else if (response && (response.selectedText === null || response.selectedText === "")) {
-        // --- No Text Selected - Proceed with Full Page Extraction ---
-        console.log("No text selected, proceeding with full page extraction.");
-        displayProcessingMessage(tab.id, "Processing page content with Gemini...");
-
-        // Inject Readability.js *now*
-        console.log("Injecting Readability.js...");
-        // Ensure file exists at this path in your extension package
-        chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['Readability.js'] })
-          .then(() => {
-            console.log("Readability injected. Sending 'extractText' message...");
-            chrome.tabs.sendMessage(tab.id, { action: "extractText" }, (extractResponse) => {
-              if (chrome.runtime.lastError) {
-                console.error("Error sending 'extractText':", chrome.runtime.lastError.message);
-                chrome.tabs.sendMessage(tab.id, { action: "showError", error: `Comms Error (ExtractText): ${chrome.runtime.lastError.message}` });
-              } else if (extractResponse && extractResponse.error) {
-                console.error("Extraction error:", extractResponse.error);
-                chrome.tabs.sendMessage(tab.id, { action: "showError", error: `Extraction Error: ${extractResponse.error}` });
-              } else if (extractResponse && extractResponse.textContent) {
-                console.log("Received text content length:", extractResponse.textContent.length);
-                callGeminiApi(apiKey, extractResponse.textContent).then(result => {
-                  if (result.error) {
-                    console.error("Gemini API call failed:", result.error);
-                    chrome.tabs.sendMessage(tab.id, { action: "showError", error: `Gemini Error: ${result.error}` });
-                  } else if (result.annotations) {
-                    console.log("Sending annotations:", result.annotations.length);
-                    chrome.tabs.sendMessage(tab.id, { action: "applyAnnotations", annotations: result.annotations, isSelection: false });
-                  } else {
-                    console.warn("Gemini API OK but no annotations or unexpected structure.");
-                    chrome.tabs.sendMessage(tab.id, { action: "showError", error: "Gemini returned success but no annotations." });
-                  }
-                });
-              } else {
-                console.warn("No text content received after Readability.");
-                chrome.tabs.sendMessage(tab.id, { action: "showError", error: "Could not extract readable content from the page." });
-              }
-            }); // End extractText sendMessage
-          })
-          .catch(err => {
-              console.error("Failed to inject Readability.js:", err);
-            chrome.tabs.sendMessage(tab.id, { action: "showError", error: `Script Injection Error (Readability): ${err.message}` });
-          }); // End Readability injection .catch
+        await annotateSelection(tab.id, response.selectedText);
       } else {
-         console.error("Unexpected response from getTextOrSelection:", response);
-        chrome.tabs.sendMessage(tab.id, { action: "showError", error: "Internal Error: Unexpected response from content script during selection check." });
+        console.log("No text selected, proceeding with full page extraction.");
+        await annotatePage(tab.id);
       }
-    }); // End getTextOrSelection sendMessage
-
+    });
   } catch (err) {
     console.error("Failed to inject content_script.js:", err);
-    // Cannot reliably send a message if the initial injection failed.
-    // Consider using chrome.notifications API as a fallback for critical errors.
   }
 });
 
-// Helper function to show the processing message (avoids code duplication)
-function displayProcessingMessage(tabId, message) {
-  console.log("Sending 'showProcessing' message:", message);
-  chrome.tabs.sendMessage(tabId, { action: "showProcessing", message: message }, (response) => {
-    if (chrome.runtime.lastError) {
-      // This can happen if the content script isn't ready or the tab was closed.
-      console.warn("Could not send 'showProcessing' message:", chrome.runtime.lastError.message);
-    } else {
-      console.log("Processing notification sent to content script.");
-    }
+// --- Context Menu Registration ---
+chrome.runtime.onInstalled.addListener(() => {
+  console.log("Extension installed or updated, registering context menus.");
+
+  // Create context menu to annotate selected text (only visible on text selection)
+  chrome.contextMenus.create({
+    id: "annotate-selection",
+    title: "Annotate Selection",
+    contexts: ["selection"]
   });
-}
+
+  // Create context menu to annotate full page (only visible on action icon right-click)
+  chrome.contextMenus.create({
+    id: "annotate-page",
+    title: "Annotate Page",
+    contexts: ["action"]
+  });
+
+  // Create context menu to clear annotations (only visible on action icon right-click)
+  chrome.contextMenus.create({
+    id: "clear-annotations",
+    title: "Clear Annotations",
+    contexts: ["action"]
+  });
+
+  // Create context menu to open options page (only visible on action icon right-click)
+  chrome.contextMenus.create({
+    id: "open-options",
+    title: "Options",
+    contexts: ["action"]
+  });
+});
+
+// --- Context Menu Click Listener ---
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  console.log("Context menu clicked:", info.menuItemId, "Tab ID:", tab?.id);
+  if (!tab || !tab.id) return;
+
+  switch (info.menuItemId) {
+    case "annotate-selection":
+      if (info.selectionText) {
+        try {
+          await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content_script.js'] });
+          await annotateSelection(tab.id, info.selectionText);
+        } catch (err) {
+          console.error("Failed to execute annotate selection:", err);
+        }
+      }
+      break;
+
+    case "annotate-page":
+      try {
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content_script.js'] });
+        await annotatePage(tab.id);
+      } catch (err) {
+        console.error("Failed to execute annotate page:", err);
+      }
+      break;
+
+    case "clear-annotations":
+      await clearAnnotations(tab.id);
+      break;
+
+    case "open-options":
+      chrome.runtime.openOptionsPage();
+      break;
+  }
+});
 
 console.log("Background script loaded. Using schema for Gemini API calls.");
