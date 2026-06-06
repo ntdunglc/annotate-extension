@@ -6,47 +6,129 @@
     return;
   }
   window.hasRunAnnotatorScript = true;
-  console.log("Annotator content script loaded/re-injected."); // Log changed slightly
+  console.log("Annotator content script loaded/re-injected.");
 
   let mainContentElement = null;
   let processingMessageDiv = null;
   let tooltipElement = null; // Reference to the single tooltip DIV
   let tooltipTimeout = null; // To add slight delay on hide
 
-  // --- Helper to Find and Wrap Text ---
-  // (Keep this function as is - the NodeFilter already prevents re-wrapping)
-  function findAndWrapText(contextNode, searchText, shortExplanation, longExplanation, vietnameseTranslation) {
-    const walker = document.createTreeWalker(contextNode, NodeFilter.SHOW_TEXT, { acceptNode: (node) => { const p = node.parentNode.tagName.toUpperCase(); if (p === 'SCRIPT' || p === 'STYLE' || node.parentNode.classList.contains('annotated-phrase')) return NodeFilter.FILTER_REJECT; return node.nodeValue.trim().length > 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP; } });
-    let node, foundCount = 0; const nodesToProcess = []; while (node = walker.nextNode()) nodesToProcess.push(node);
-    for (var textNode of nodesToProcess) {
-      if (!textNode.parentNode || !textNode.nodeValue) continue;
-      let matchIndex = -1;
-      try {
-        // Use a case-insensitive search? For now, keep it case-sensitive as the LLM likely returns the exact phrase.
-        matchIndex = textNode.nodeValue.indexOf(searchText);
-      } catch (e) { console.warn("Error finding text:", e, textNode, searchText); continue; }
+  // --- Helper: Escape special characters for RegExp ---
+  function escapeRegExp(string) {
+    // $& means the whole matched string
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
 
-      while (matchIndex !== -1) {
-        foundCount++; const matchEnd = matchIndex + searchText.length; const span = document.createElement('span'); span.className = 'annotated-phrase';
+
+  // --- Helper to Find and Wrap Text (MODIFIED for Case-Insensitive & Whole Word) ---
+  function findAndWrapText(contextNode, searchText, shortExplanation, longExplanation, vietnameseTranslation) {
+    // Create a case-insensitive, global, whole-word regex
+    // \b ensures matches are bounded by non-word characters (space, punctuation, start/end of string)
+    const escapedSearchText = escapeRegExp(searchText);
+    // Important: Match requires word boundaries ONLY if the search term itself starts/ends with a word character.
+    // E.g., searching for "$100" shouldn't require a word boundary at the start.
+    // Simple heuristic: check first/last chars. More robust might involve Unicode properties if needed.
+    const wordCharRegex = /\w/; // Matches letters, digits, underscore
+    const startsWithWord = wordCharRegex.test(escapedSearchText[0]);
+    const endsWithWord = wordCharRegex.test(escapedSearchText[escapedSearchText.length - 1]);
+    const pattern = (startsWithWord ? '\\b' : '') + escapedSearchText + (endsWithWord ? '\\b' : '');
+    const regex = new RegExp(pattern, 'gi'); // g = global, i = case-insensitive
+
+    // Filter tweaked slightly for robustness
+    const filter = {
+      acceptNode: (node) => {
+        // Reject nodes inside already annotated spans or specific elements
+        if (node.parentNode.nodeName === 'SCRIPT' || node.parentNode.nodeName === 'STYLE' || node.parentNode.classList.contains('annotated-phrase')) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        // Only accept text nodes with content that might match (case-insensitive check included)
+        if (node.nodeType === Node.TEXT_NODE && node.nodeValue.trim().length > 0 && regex.test(node.nodeValue)) {
+          // Reset regex lastIndex after testing so exec starts from the beginning
+          regex.lastIndex = 0;
+          return NodeFilter.FILTER_ACCEPT;
+        }
+        return NodeFilter.FILTER_SKIP;
+      }
+    };
+
+    const walker = document.createTreeWalker(contextNode, NodeFilter.SHOW_TEXT, filter);
+    const nodesToProcess = [];
+    let node;
+    // Collect all matching text nodes first to avoid issues with modifying the DOM during traversal
+    while (node = walker.nextNode()) {
+      nodesToProcess.push(node);
+    }
+
+    let foundCount = 0;
+    for (const textNode of nodesToProcess) {
+      // Ensure the node is still in the document and has a parent
+      if (!textNode.parentNode || !document.body.contains(textNode)) continue;
+
+      let currentNode = textNode;
+      let match;
+      let lastMatchEnd = 0;
+      const fragments = []; // To hold text segments and spans
+
+      // Reset regex for each node before executing
+      regex.lastIndex = 0;
+
+      // Use regex.exec to find matches sequentially in the current node's value
+      while ((match = regex.exec(currentNode.nodeValue)) !== null) {
+        const matchIndex = match.index;
+        const matchedText = match[0]; // Actual matched text (preserves original case)
+        const matchLength = matchedText.length;
+
+        // Add text before the match (if any)
+        if (matchIndex > lastMatchEnd) {
+          fragments.push(document.createTextNode(currentNode.nodeValue.substring(lastMatchEnd, matchIndex)));
+        }
+
+        // Create and add the annotation span
+        const span = document.createElement('span');
+        span.className = 'annotated-phrase';
         span.dataset.shortExplanation = shortExplanation;
         span.dataset.longExplanation = longExplanation;
         span.dataset.vietnameseTranslation = vietnameseTranslation;
-        span.textContent = textNode.nodeValue.substring(matchIndex, matchEnd);
+        span.textContent = matchedText; // Use the originally cased text from the document
+        span.addEventListener('mouseenter', handlePhraseMouseEnter);
+        span.addEventListener('mouseleave', handlePhraseMouseLeave);
+        fragments.push(span);
+        foundCount++;
 
-        try {
-          const afterTextNode = textNode.splitText(matchIndex);
-          afterTextNode.nodeValue = afterTextNode.nodeValue.substring(searchText.length);
-          textNode.parentNode.insertBefore(span, afterTextNode);
-          span.addEventListener('mouseenter', handlePhraseMouseEnter);
-          span.addEventListener('mouseleave', handlePhraseMouseLeave);
-          textNode = afterTextNode;
-          // Find next occurrence in the *rest* of the text node
-          matchIndex = textNode.nodeValue.indexOf(searchText);
-          // break; // Original code had break, let's allow multiple matches in one node
-        } catch (e) { console.error("Error inserting span:", e); matchIndex = -1; /* Stop trying in this node on error */ }
+        lastMatchEnd = matchIndex + matchLength;
+
+        // If the regex is global (g flag), exec advances lastIndex automatically.
+        // If we reached the end of the string, break the loop.
+        if (regex.lastIndex === currentNode.nodeValue.length) {
+          break;
+        }
       }
-    } return foundCount > 0;
+
+      // Add any remaining text after the last match
+      if (lastMatchEnd < currentNode.nodeValue.length) {
+        fragments.push(document.createTextNode(currentNode.nodeValue.substring(lastMatchEnd)));
+      }
+
+      // If we found matches and created fragments, replace the original text node
+      if (fragments.length > 0) {
+        try {
+          // Replace the original text node with the new fragments (text nodes and spans)
+          // Using DocumentFragment for potentially better performance with many fragments
+          const docFrag = document.createDocumentFragment();
+          fragments.forEach(frag => docFrag.appendChild(frag));
+          currentNode.parentNode.replaceChild(docFrag, currentNode);
+        } catch (e) {
+          console.error("Error replacing text node with fragments:", e, currentNode);
+          // Decrement count if replacement failed for this node's matches
+          // This isn't perfect, as some fragments might have been processed before error.
+          foundCount -= fragments.filter(f => f.nodeName === 'SPAN').length;
+        }
+      }
+    } // End loop through nodesToProcess
+
+    return foundCount > 0;
   }
+
 
   // --- Apply Annotations (MODIFIED: No longer clears previous) ---
   function applyAnnotations(annotations, isSelection) {
@@ -76,21 +158,22 @@
       // ADDED: Check for vietnamese_translation field existence
       if (annotation.phrase && annotation.short_explanation && annotation.long_explanation && annotation.vietnamese_translation && annotation.phrase.trim().length > 0) {
         try {
+          // Pass context node here
           if (findAndWrapText(
-            context, // Use the determined context
+            context,
             annotation.phrase,
             annotation.short_explanation,
             annotation.long_explanation,
-            annotation.vietnamese_translation // Pass it here
+            annotation.vietnamese_translation
           )) {
-            appliedCount++;
+            appliedCount++; // findAndWrapText now returns true if *any* match was wrapped
           }
         } catch (e) { console.error(`Error applying "${annotation.phrase}":`, e); }
       } else { console.warn("Skipping invalid or incomplete annotation:", annotation); }
     });
-    console.log("Applied count for this run:", appliedCount);
-    if (appliedCount > 0) {
-      displayMessage(`Annotated ${appliedCount} new phrase(s). Hover over dotted text.`, "success");
+    console.log("Total spans possibly added/found in this run (includes multiple instances):", appliedCount); // Note: count is different now
+    if (appliedCount > 0) { // Note: appliedCount is now > 0 if *any* instance of *any* phrase was applied
+      displayMessage(`Annotated new phrase instance(s). Hover over dotted text.`, "success");
     } else {
       // This message might be confusing if annotations already exist but none were found *in this specific text*
       displayMessage("Could not find the specific phrases from the analysis on this page.", "warning");
@@ -103,6 +186,7 @@
     // Use body as the ultimate container to find all spans, regardless of original context
     const container = document.body;
     const existingSpans = container.querySelectorAll('span.annotated-phrase');
+    let clearedCount = 0;
     existingSpans.forEach(span => {
       span.removeEventListener('mouseenter', handlePhraseMouseEnter);
       span.removeEventListener('mouseleave', handlePhraseMouseLeave);
@@ -110,21 +194,38 @@
       if (p) {
         try {
           // Replace the span with its text content
-          p.replaceChild(document.createTextNode(span.textContent || ''), span);
+          const textNode = document.createTextNode(span.textContent || '');
+          p.replaceChild(textNode, span);
           p.normalize(); // Merges adjacent text nodes
+          clearedCount++;
         } catch (e) {
           console.warn("Could not cleanly remove annotation span:", e, span);
           // Fallback: just remove the span if replacement fails
           if (span.parentNode) {
-            span.remove();
+            try {
+              span.remove();
+              // Don't increment count on fallback removal as content is lost
+            } catch (removeError) {
+              console.error("Failed to remove span as fallback:", removeError, span);
+            }
           }
         }
       } else {
-        // If span has no parent (shouldn't happen often), just remove listeners
-        span.remove();
+        // If span has no parent (shouldn't happen often), just try to remove it
+        try {
+          span.remove();
+        } catch (removeError) {
+          console.error("Failed to remove span with no parent:", removeError, span);
+        }
       }
     });
-    console.log("Cleared previous annotations and listeners.");
+    console.log(`Cleared ${clearedCount} previous annotation spans.`);
+    // Optionally display a message
+    if (clearedCount > 0) {
+      // displayMessage(`Cleared ${clearedCount} annotations.`, "info");
+    } else {
+      // displayMessage("No annotations found to clear.", "info");
+    }
   }
 
   // --- Inject CSS (Keep as is) ---
@@ -272,7 +373,7 @@
     tip.classList.add('visible');
     positionTooltip(targetSpan, tip);
 
-    console.log("Showing tooltip for:", targetSpan.textContent);
+    // console.log("Showing tooltip for:", targetSpan.textContent); // Less noisy log
   }
 
 
@@ -301,15 +402,15 @@
 
       if (potentialTop >= buffer) { // Fits above?
         top = potentialTop;
-        } else { // Doesn't fit above, try below
-          top = targetRect.bottom + buffer;
-          // Doesn't fit below either? Place at bottom edge of viewport.
-          if (top + tipRect.height > viewportHeight - buffer) {
-            top = viewportHeight - tipRect.height - buffer;
-            // If it's still too tall for viewport, place at top edge.
-            if (top < buffer) top = buffer;
-          }
+      } else { // Doesn't fit above, try below
+        top = targetRect.bottom + buffer;
+        // Doesn't fit below either? Place at bottom edge of viewport.
+        if (top + tipRect.height > viewportHeight - buffer) {
+          top = viewportHeight - tipRect.height - buffer;
+          // If it's still too tall for viewport, place at top edge.
+          if (top < buffer) top = buffer;
         }
+      }
 
       // Center horizontally relative to the target span
       left = targetRect.left + (targetRect.width / 2) - (tipRect.width / 2);
@@ -342,7 +443,7 @@
     if (!unsafe) return '';
     // Basic escaping, sufficient for text content
     return unsafe
-      .replace(/&/g, "&") // Escape ampersand first
+      .replace(/&/g, "&") // Use & for ampersand
       .replace(/</g, "<")
       .replace(/>/g, ">")
       .replace(/"/g, "\"")
@@ -380,7 +481,15 @@
       messageTimeout = setTimeout(() => {
         if (msgDiv) {
           msgDiv.classList.remove('visible');
-          msgDiv.addEventListener('transitionend', () => { if (msgDiv) msgDiv.remove(); }, { once: true }); // Safer remove
+          // Safer removal after transition
+          const removeHandler = () => {
+            if (msgDiv) {
+              msgDiv.removeEventListener('transitionend', removeHandler);
+              msgDiv.remove();
+            }
+          };
+          msgDiv.addEventListener('transitionend', removeHandler);
+          // Fallback removal in case transition doesn't fire reliably
           setTimeout(() => { if (msgDiv && !msgDiv.classList.contains('visible')) msgDiv.remove(); }, 500);
         }
       }, 3500);
@@ -388,14 +497,19 @@
   }
 
 
-  // --- Hide Persistent Processing Message (Keep as is) ---
+  // --- Hide Persistent Processing Message (Keep as is, added safety) ---
   function hideProcessingMessage(clearTemporary = true) {
     if (processingMessageDiv) {
-      processingMessageDiv.classList.remove('visible');
-      processingMessageDiv.addEventListener('transitionend', () => { if (processingMessageDiv) processingMessageDiv.remove(); }, { once: true }); // Safer remove
+      const divToRemove = processingMessageDiv; // Capture reference
+      processingMessageDiv = null; // Clear global ref immediately
+      divToRemove.classList.remove('visible');
+      const removeHandler = () => {
+        divToRemove.removeEventListener('transitionend', removeHandler);
+        divToRemove.remove();
+      };
+      divToRemove.addEventListener('transitionend', removeHandler);
       // Fallback removal
-      setTimeout(() => { if (processingMessageDiv && !processingMessageDiv.classList.contains('visible')) processingMessageDiv.remove(); }, 500);
-      processingMessageDiv = null;
+      setTimeout(() => { if (divToRemove && document.body.contains(divToRemove)) divToRemove.remove(); }, 500);
     }
     if (clearTemporary) {
       clearTimeout(messageTimeout);
@@ -484,13 +598,14 @@
     // Optional: Add action to explicitly clear annotations if desired later
     // else if (request.action === "clearAllAnnotations") {
     //    clearPreviousAnnotations();
-    //    displayMessage("Annotations cleared.", "info");
+    //    // displayMessage("Annotations cleared.", "info"); // Message now shown inside clear function
     //    sendResponse({ status: "Annotations cleared"});
     //    return true;
     // }
 
     console.warn(`Content Script: Unknown action received: ${request.action}`);
     // Return false or nothing for unhandled synchronous messages
+    return false; // Explicitly return false for unhandled actions
   });
 
   // --- Initial Setup ---
